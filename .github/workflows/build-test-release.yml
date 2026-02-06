@@ -8,8 +8,12 @@ on:
     branches: [ master ]
   workflow_dispatch:
     inputs:
+      tag_name:
+        description: 'Tag name for the release (e.g. v1.1.0)'
+        required: false
+        type: string
       release:
-        description: 'Create a release'
+        description: 'Create a draft release'
         required: false
         type: boolean
         default: false
@@ -99,6 +103,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
           files: dist/*
           draft: true
           generate_release_notes: true
