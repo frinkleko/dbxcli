@@ -1,0 +1,106 @@
+name: Build, Test and Release
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Create a release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install gox
+        run: go install github.com/mitchellh/gox@latest
+
+      - name: Build
+        env:
+          PERSONAL_KEY: ${{ secrets.PERSONAL_KEY }}
+          PERSONAL_SECRET: ${{ secrets.PERSONAL_SECRET }}
+          ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          MANAGE_KEY: ${{ secrets.MANAGE_KEY }}
+          MANAGE_SECRET: ${{ secrets.MANAGE_SECRET }}
+        run: |
+          # Use tag name if available, otherwise use short SHA
+          VERSION=${GITHUB_REF_NAME}
+          if [[ $GITHUB_REF != refs/tags/* ]]; then
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.personalAppKey=${PERSONAL_KEY}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.personalAppSecret=${PERSONAL_SECRET}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.teamAccessAppKey=${ACCESS_KEY}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.teamAccessAppSecret=${ACCESS_SECRET}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.teamManageAppKey=${MANAGE_KEY}"
+          LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.teamManageAppSecret=${MANAGE_SECRET}"
+          
+          mkdir -p dist
+          gox -ldflags="${LDFLAGS}" 
+              -osarch="darwin/amd64 linux/amd64 windows/amd64 linux/arm openbsd/amd64" 
+              -output "dist/dbxcli-{{.OS}}-{{.Arch}}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: binaries
+          path: dist/*
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: binaries
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*
+          draft: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

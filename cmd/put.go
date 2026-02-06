@@ -23,6 +23,8 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,6 +146,45 @@ func uploadChunked(dbx files.Client, r io.Reader, commitInfo *files.CommitInfo, 
 	return
 }
 
+func putFile(dbx files.Client, src string, dst string, chunkSize int64, workers int, debug bool) error {
+	contents, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer contents.Close()
+
+	contentsInfo, err := contents.Stat()
+	if err != nil {
+		return err
+	}
+
+	progressbar := &ioprogress.Reader{
+		Reader: contents,
+		DrawFunc: ioprogress.DrawTerminalf(os.Stderr, func(progress, total int64) string {
+			return fmt.Sprintf("Uploading %s: %s/%s",
+				src, humanize.IBytes(uint64(progress)), humanize.IBytes(uint64(total)))
+		}),
+		Size: contentsInfo.Size(),
+	}
+
+	commitInfo := files.NewCommitInfo(dst)
+	commitInfo.Mode.Tag = "overwrite"
+
+	// The Dropbox API only accepts timestamps in UTC with second precision.
+	ts := time.Now().UTC().Round(time.Second)
+	commitInfo.ClientModified = &ts
+
+	if contentsInfo.Size() > singleShotUploadSizeCutoff {
+		return uploadChunked(dbx, progressbar, commitInfo, contentsInfo.Size(), workers, chunkSize, debug)
+	}
+
+	if _, err = dbx.Upload(commitInfo, progressbar); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func put(cmd *cobra.Command, args []string) (err error) {
 	if len(args) == 0 || len(args) > 2 {
 		return errors.New("`put` requires `src` and/or `dst` arguments")
@@ -166,9 +207,13 @@ func put(cmd *cobra.Command, args []string) (err error) {
 	debug, _ := cmd.Flags().GetBool("debug")
 
 	src := args[0]
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
 
 	// Default `dst` to the base segment of the source path; use the second argument if provided.
-	dst := "/" + path.Base(src)
+	dst := "/" + filepath.Base(src)
 	if len(args) == 2 {
 		dst, err = validatePath(args[1])
 		if err != nil {
@@ -176,52 +221,102 @@ func put(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	contents, err := os.Open(src)
-	if err != nil {
-		return
-	}
-	defer contents.Close()
-
-	contentsInfo, err := contents.Stat()
-	if err != nil {
-		return
-	}
-
-	progressbar := &ioprogress.Reader{
-		Reader: contents,
-		DrawFunc: ioprogress.DrawTerminalf(os.Stderr, func(progress, total int64) string {
-			return fmt.Sprintf("Uploading %s/%s",
-				humanize.IBytes(uint64(progress)), humanize.IBytes(uint64(total)))
-		}),
-		Size: contentsInfo.Size(),
-	}
-
-	commitInfo := files.NewCommitInfo(dst)
-	commitInfo.Mode.Tag = "overwrite"
-
-	// The Dropbox API only accepts timestamps in UTC with second precision.
-	ts := time.Now().UTC().Round(time.Second)
-	commitInfo.ClientModified = &ts
-
 	dbx := files.New(config)
-	if contentsInfo.Size() > singleShotUploadSizeCutoff {
-		return uploadChunked(dbx, progressbar, commitInfo, contentsInfo.Size(), workers, chunkSize, debug)
+
+	if srcInfo.IsDir() {
+		// Create the root folder first to ensure it exists even if empty
+		arg := files.NewCreateFolderArg(dst)
+		if _, err := dbx.CreateFolderV2(arg); err != nil {
+			// If the folder already exists, we can ignore the error
+			if !strings.Contains(err.Error(), "conflict/folder") {
+				return err
+			}
+		}
+
+		jobCh := make(chan string)
+		errCh := make(chan error, workers)
+		var wg sync.WaitGroup
+
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for subPath := range jobCh {
+					info, err := os.Stat(subPath)
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					rel, err := filepath.Rel(src, subPath)
+					if err != nil {
+						errCh <- err
+						return
+					}
+
+					dstPath := path.Join(dst, filepath.ToSlash(rel))
+
+					if info.IsDir() {
+						arg := files.NewCreateFolderArg(dstPath)
+						if _, err = dbx.CreateFolderV2(arg); err != nil {
+							// If the folder already exists, we can ignore the error
+							if !strings.Contains(err.Error(), "conflict/folder") {
+								errCh <- err
+								return
+							}
+						}
+					} else {
+						if err := putFile(dbx, subPath, dstPath, chunkSize, 1, debug); err != nil {
+							errCh <- err
+							return
+						}
+					}
+				}
+			}()
+		}
+
+		err = filepath.Walk(src, func(subPath string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			// Skip the root directory itself as it's handled by 'dst'
+			if subPath == src {
+				return nil
+			}
+
+			select {
+			case jobCh <- subPath:
+			case err := <-errCh:
+				return err
+			}
+			return nil
+		})
+
+		close(jobCh)
+		wg.Wait()
+
+		if err != nil {
+			return err
+		}
+
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			return nil
+		}
 	}
 
-	if _, err = dbx.Upload(commitInfo, progressbar); err != nil {
-		return
-	}
-
-	return
+	return putFile(dbx, src, dst, chunkSize, workers, debug)
 }
 
 // putCmd represents the put command
 var putCmd = &cobra.Command{
 	Use:   "put [flags] <source> [<target>]",
-	Short: "Upload a single file",
-	Long: `Upload a single file
-	- If target is not provided puts the file in the root of your Dropbox directory.
-	- If target is provided it must be the desired filename in the cloud (and not a directory).
+	Short: "Upload files or folders",
+	Long: `Upload files or folders
+	- If target is not provided puts the file or folder in the root of your Dropbox directory.
+	- If target is provided it must be the desired path in the cloud.
 	`,
 
 	RunE: put,
