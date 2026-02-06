@@ -146,7 +146,7 @@ func uploadChunked(dbx files.Client, r io.Reader, commitInfo *files.CommitInfo, 
 	return
 }
 
-func putFile(dbx files.Client, src string, dst string, chunkSize int64, workers int, debug bool) error {
+func putFile(dbx files.Client, src string, dst string, chunkSize int64, workers int, debug bool, skipExisting bool) error {
 	contents, err := os.Open(src)
 	if err != nil {
 		return err
@@ -156,6 +156,18 @@ func putFile(dbx files.Client, src string, dst string, chunkSize int64, workers 
 	contentsInfo, err := contents.Stat()
 	if err != nil {
 		return err
+	}
+
+	if skipExisting {
+		metaArg := files.NewGetMetadataArg(dst)
+		if res, err := dbx.GetMetadata(metaArg); err == nil {
+			if f, ok := res.(*files.FileMetadata); ok {
+				if int64(f.Size) == contentsInfo.Size() {
+					fmt.Fprintf(os.Stderr, "Skipping %s (already exists and same size)\n", src)
+					return nil
+				}
+			}
+		}
 	}
 
 	progressbar := &ioprogress.Reader{
@@ -178,7 +190,13 @@ func putFile(dbx files.Client, src string, dst string, chunkSize int64, workers 
 		return uploadChunked(dbx, progressbar, commitInfo, contentsInfo.Size(), workers, chunkSize, debug)
 	}
 
-	if _, err = dbx.Upload(commitInfo, progressbar); err != nil {
+	uploadArg := files.NewUploadArg(dst)
+	uploadArg.Mode = commitInfo.Mode
+	uploadArg.ClientModified = commitInfo.ClientModified
+	uploadArg.Mute = commitInfo.Mute
+	uploadArg.StrictConflict = commitInfo.StrictConflict
+
+	if _, err = dbx.Upload(uploadArg, progressbar); err != nil {
 		return err
 	}
 
@@ -205,6 +223,7 @@ func put(cmd *cobra.Command, args []string) (err error) {
 		workers = 1
 	}
 	debug, _ := cmd.Flags().GetBool("debug")
+	skipExisting, _ := cmd.Flags().GetBool("skip-existing")
 
 	src := args[0]
 	srcInfo, err := os.Stat(src)
@@ -266,7 +285,7 @@ func put(cmd *cobra.Command, args []string) (err error) {
 							}
 						}
 					} else {
-						if err := putFile(dbx, subPath, dstPath, chunkSize, 1, debug); err != nil {
+						if err := putFile(dbx, subPath, dstPath, chunkSize, 1, debug, skipExisting); err != nil {
 							errCh <- err
 							return
 						}
@@ -307,7 +326,7 @@ func put(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	return putFile(dbx, src, dst, chunkSize, workers, debug)
+	return putFile(dbx, src, dst, chunkSize, workers, debug, skipExisting)
 }
 
 // putCmd represents the put command
@@ -327,4 +346,5 @@ func init() {
 	putCmd.Flags().IntP("workers", "w", 4, "Number of concurrent upload workers to use")
 	putCmd.Flags().Int64P("chunksize", "c", 1<<24, "Chunk size to use (should be multiple of 4MiB)")
 	putCmd.Flags().BoolP("debug", "d", false, "Print debug timing")
+	putCmd.Flags().BoolP("skip-existing", "s", false, "Skip uploading if file already exists on Dropbox and has the same size")
 }

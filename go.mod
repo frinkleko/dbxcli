@@ -3,7 +3,7 @@ module github.com/dropbox/dbxcli
 go 1.11
 
 require (
-	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.1
+	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5
 	github.com/dustin/go-humanize v1.0.0
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0

@@ -89,6 +89,10 @@ func validatePath(p string) (path string, err error) {
 
 	path = strings.TrimSuffix(path, "/")
 
+	if path == "" {
+		path = "/"
+	}
+
 	return
 }
 

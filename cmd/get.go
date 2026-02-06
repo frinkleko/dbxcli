@@ -30,7 +30,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func downloadFile(dbx files.Client, entry *files.FileMetadata, dst string) error {
+func downloadFile(dbx files.Client, entry *files.FileMetadata, dst string, skipExisting bool) error {
+	if skipExisting {
+		if info, err := os.Stat(dst); err == nil {
+			if info.Size() == int64(entry.Size) {
+				fmt.Fprintf(os.Stderr, "Skipping %s (already exists and same size)\n", entry.PathDisplay)
+				return nil
+			}
+		}
+	}
+
 	arg := files.NewDownloadArg(entry.PathLower)
 	res, contents, err := dbx.Download(arg)
 	if err != nil {
@@ -64,7 +73,7 @@ func downloadFile(dbx files.Client, entry *files.FileMetadata, dst string) error
 	return nil
 }
 
-func downloadFolder(dbx files.Client, folder *files.FolderMetadata, dst string, workers int) error {
+func downloadFolder(dbx files.Client, folder *files.FolderMetadata, dst string, workers int, skipExisting bool) error {
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err
 	}
@@ -99,7 +108,7 @@ func downloadFolder(dbx files.Client, folder *files.FolderMetadata, dst string, 
 					rel := strings.TrimPrefix(f.PathLower, folder.PathLower)
 					rel = strings.TrimPrefix(rel, "/")
 					localPath := filepath.Join(dst, filepath.FromSlash(rel))
-					if err := downloadFile(dbx, f, localPath); err != nil {
+					if err := downloadFile(dbx, f, localPath, skipExisting); err != nil {
 						errCh <- err
 						return
 					}
@@ -158,6 +167,8 @@ func get(cmd *cobra.Command, args []string) (err error) {
 		workers = 1
 	}
 
+	skipExisting, _ := cmd.Flags().GetBool("skip-existing")
+
 	dbx := files.New(config)
 	metaArg := files.NewGetMetadataArg(src)
 	res, err := dbx.GetMetadata(metaArg)
@@ -167,9 +178,9 @@ func get(cmd *cobra.Command, args []string) (err error) {
 
 	switch f := res.(type) {
 	case *files.FolderMetadata:
-		return downloadFolder(dbx, f, dst, workers)
+		return downloadFolder(dbx, f, dst, workers, skipExisting)
 	case *files.FileMetadata:
-		return downloadFile(dbx, f, dst)
+		return downloadFile(dbx, f, dst, skipExisting)
 	default:
 		return fmt.Errorf("unexpected metadata type: %T", f)
 	}
@@ -185,4 +196,5 @@ var getCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(getCmd)
 	getCmd.Flags().IntP("workers", "w", 4, "Number of concurrent download workers to use")
+	getCmd.Flags().BoolP("skip-existing", "s", false, "Skip downloading if local file already exists and has the same size")
 }
