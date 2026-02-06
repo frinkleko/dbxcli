@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.21'
           cache: true
@@ -37,10 +37,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.21'
           cache: true
@@ -72,12 +72,12 @@ jobs:
           LDFLAGS+=" -X github.com/dropbox/dbxcli/cmd.teamManageAppSecret=${MANAGE_SECRET}"
           
           mkdir -p dist
-          gox -ldflags="${LDFLAGS}" 
-              -osarch="darwin/amd64 linux/amd64 windows/amd64 linux/arm openbsd/amd64" 
+          gox -ldflags="${LDFLAGS}" \
+              -osarch="darwin/amd64 linux/amd64 windows/amd64 linux/arm openbsd/amd64" \
               -output "dist/dbxcli-{{.OS}}-{{.Arch}}"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: binaries
           path: dist/*
@@ -91,13 +91,13 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: binaries
           path: dist
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           draft: true
